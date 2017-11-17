@@ -8,6 +8,7 @@ import os
 import json
 import socket
 import time
+import re
 
 AMBAR_LOGO = """ 
 
@@ -22,8 +23,9 @@ ______           ____     ______  ____
 
                                               """
 
-VERSION = '0.0.2'
+VERSION = '1.0.0'
 STATIC_FILE_HOST = 'https://static.ambar.cloud/'
+DOCKER_COMPOSE_TEMPLATE_URL = 'https://static.ambar.cloud/docker-compose.yml'
 BLOG_HOST = 'https://blog.ambar.cloud/'
 START = 'start'
 STOP = 'stop'
@@ -41,7 +43,6 @@ parser.add_argument('action', choices=[INSTALL, START, STOP, RESTART, UPDATE, RE
 parser.add_argument('--version', action='version', version = VERSION)
 parser.add_argument('--useLocalConfig', action='store_true', help = 'use config.json from the script directory')
 parser.add_argument('--configUrl', default = '{0}config.json'.format(STATIC_FILE_HOST), help = 'url of configuration file')
-parser.add_argument('--nowait', dest='nowait', action='store_true', help = 'do now wait for Ambar to start')
 
 args = parser.parse_args()
 
@@ -85,23 +86,36 @@ def getMachineIpAddress():
     ipAddress = subprocess.check_output("echo $(ip route get 8.8.8.8 | head -1 | cut -d' ' -f8)", shell=True)
     return str(ipAddress.decode("utf-8").replace('\n', ''))
 
-def writeOsConstantIfNotExist(sysConfig, writeDescriptor, key, value):
+def writeOsConstantIfNotExists(sysConfig, writeDescriptor, key, value):
     if (sysConfig.find(key) == -1):
         writeDescriptor.write("{0}={1}\n".format(key,value))
-    
+
+def writeRcLocalDirectiveIfNotExist(rcLocal, writeDescriptor, directive):
+    if (rcLocal.find(directive) == -1):
+        writeDescriptor.write("{0}\n".format(directive))
+
 def setOsConstants():
     sysConfig = None
+    rcLocal = None
+
     with open('/etc/sysctl.conf', 'r') as sysConfigFile:
         sysConfig = sysConfigFile.read()
     
     with open('/etc/sysctl.conf', 'a') as sysConfigFile:
-        writeOsConstantIfNotExist(sysConfig, sysConfigFile, 'vm.max_map_count', '262144')
-        writeOsConstantIfNotExist(sysConfig, sysConfigFile, 'net.ipv4.ip_local_port_range', '"15000 61000"')
-        writeOsConstantIfNotExist(sysConfig, sysConfigFile, 'net.ipv4.tcp_fin_timeout', '30')
-        writeOsConstantIfNotExist(sysConfig, sysConfigFile, 'net.core.somaxconn', '1024')
-        writeOsConstantIfNotExist(sysConfig, sysConfigFile, 'net.core.netdev_max_backlog', '2000')
-        writeOsConstantIfNotExist(sysConfig, sysConfigFile, 'net.ipv4.tcp_max_syn_backlog', '2048')        
+        writeOsConstantIfNotExists(sysConfig, sysConfigFile, 'vm.max_map_count', '262144')
+        writeOsConstantIfNotExists(sysConfig, sysConfigFile, 'net.ipv4.ip_local_port_range', '"15000 61000"')
+        writeOsConstantIfNotExists(sysConfig, sysConfigFile, 'net.ipv4.tcp_fin_timeout', '30')
+        writeOsConstantIfNotExists(sysConfig, sysConfigFile, 'net.core.somaxconn', '1024')
+        writeOsConstantIfNotExists(sysConfig, sysConfigFile, 'net.core.netdev_max_backlog', '2000')
+        writeOsConstantIfNotExists(sysConfig, sysConfigFile, 'net.ipv4.tcp_max_syn_backlog', '2048')        
+        writeOsConstantIfNotExists(sysConfig, sysConfigFile, 'vm.overcommit_memory', '1')      
+
+    with open('/etc/rc.local', 'r') as rcLocalConfigFile:
+        rcLocal = rcLocalConfigFile.read()
         
+    with open('/etc/rc.local', 'a') as rcLocalConfigFile:
+        writeRcLocalDirectiveIfNotExist(rcLocal, rcLocalConfigFile, 'echo never > /sys/kernel/mm/transparent_hugepage/enabled')      
+
 def setRunTimeOsConstants():
     runShellCommandStrict('sysctl -w vm.max_map_count=262144')
     runShellCommandStrict('sysctl -w net.ipv4.ip_local_port_range="15000 61000"')
@@ -109,6 +123,8 @@ def setRunTimeOsConstants():
     runShellCommandStrict('sysctl -w net.core.somaxconn=1024')
     runShellCommandStrict('sysctl -w net.core.netdev_max_backlog=2000')
     runShellCommandStrict('sysctl -w net.ipv4.tcp_max_syn_backlog=2048')
+    runShellCommandStrict('sysctl -w vm.overcommit_memory=1')
+    runShellCommandStrict('echo never > /sys/kernel/mm/transparent_hugepage/enabled')
         
 def pullImages(configuration):
     dockerRepo = configuration['dockerRepo']
@@ -117,62 +133,27 @@ def pullImages(configuration):
     runShellCommandStrict("docker pull {0}/ambar-pipeline:latest".format(dockerRepo))
     runShellCommandStrict("docker-compose -f {0}/docker-compose.yml pull".format(PATH))
 
-def getDockerComposeTemplate():
-    composeTemplate = None
-    with open('{0}/docker-compose.template.yml'.format(PATH), 'r') as composeTemplateFile:
-        composeTemplate = composeTemplateFile.read()
-    return composeTemplate
+def generateEnvFile(configuration):  
+    envFileLines = []
 
-def generateDockerCompose(configuration):        
-    composeTemplate = getDockerComposeTemplate()
-
-    composeTemplate = composeTemplate.replace('${DOCKER_REPO_URL}', configuration['dockerRepo'])
+    if os.path.exists('{0}/.env'.format(PATH)):
+        with open('{0}/.env'.format(PATH), 'r') as envFile:
+            envFileLines = envFile.readlines()
     
-    composeTemplate = composeTemplate.replace('${DB_PATH}', '{0}/db'.format(configuration['dataPath']))
-    composeTemplate = composeTemplate.replace('${ES_PATH}', '{0}/es'.format(configuration['dataPath']))
-    composeTemplate = composeTemplate.replace('${RABBIT_PATH}', '{0}/rabbit'.format(configuration['dataPath']))
-
-    if configuration['fe']['external']['port'].strip() == configuration['api']['external']['port'].strip():
-        composeTemplate = composeTemplate.replace('- "${API_EXT_PORT}:${API_EXT_PORT}"','')
-        composeTemplate = composeTemplate.replace('- ${API_EXT_PORT}','')       
-
-    composeTemplate = composeTemplate.replace('${FE_EXT_PORT}', configuration['fe']['external']['port'])
-    composeTemplate = composeTemplate.replace('${FE_EXT_HOST}', configuration['fe']['external']['host'])
-    composeTemplate = composeTemplate.replace('${FE_EXT_PROTOCOL}', configuration['fe']['external']['protocol'])
-
-    composeTemplate = composeTemplate.replace('${API_EXT_PORT}', configuration['api']['external']['port'])
-    composeTemplate = composeTemplate.replace('${API_EXT_PROTOCOL}', configuration['api']['external']['protocol'])
-    composeTemplate = composeTemplate.replace('${API_EXT_HOST}', configuration['api']['external']['host'])
-
-    composeTemplate = composeTemplate.replace('${PIPELINE_COUNT}', str(configuration['api']['pipelineCount']))
-    composeTemplate = composeTemplate.replace('${CRAWLER_COUNT}', str(configuration['api']['crawlerCount']))
-    composeTemplate = composeTemplate.replace('${ANALYTICS_TOKEN}', configuration['api'].get('analyticsToken', ''))
-    composeTemplate = composeTemplate.replace('${DEFAULT_LANG_ANALYZER}', configuration['api']['defaultLangAnalyzer'])
-    composeTemplate = composeTemplate.replace('${AUTH_TYPE}', configuration['api']['auth'])
-    composeTemplate = composeTemplate.replace('${WEBAPI_CACHE_SIZE}', configuration['api']['cacheSize'])
-
-    if 'mode' in configuration['api']:
-        composeTemplate = composeTemplate.replace('${MODE}', configuration['api']['mode'])
-    else:
-        composeTemplate = composeTemplate.replace('${MODE}', 'ce')
-    if 'showFilePreview' in configuration['api']:
-        composeTemplate = composeTemplate.replace('${SHOW_FILE_PREVIEW}', configuration['api']['showFilePreview'])
-    else:
-        composeTemplate = composeTemplate.replace('${SHOW_FILE_PREVIEW}', 'false')
-
-    composeTemplate = composeTemplate.replace('${ES_HEAP_SIZE}', configuration['es']['heapSize'])
-    composeTemplate = composeTemplate.replace('${ES_CONTAINER_SIZE}', configuration['es']['containerSize'])
-
-    composeTemplate = composeTemplate.replace('${OCR_PDF_MAX_PAGE_COUNT}', str(configuration['ocr']['pdfMaxPageCount']))
-    composeTemplate = composeTemplate.replace('${OCR_PDF_SYMBOLS_PER_PAGE_THRESHOLD}', str(configuration['ocr']['pdfSymbolsPerPageThreshold']))
+    settings = {}
+    for line in envFileLines:
+        if '=' in line:
+            settings[line.split('=')[0]] = line.split('=')[1]
     
-    composeTemplate = composeTemplate.replace('${DROPBOX_CLIENT_ID}', configuration['dropbox']['clientId'])
-    composeTemplate = composeTemplate.replace('${DROPBOX_REDIRECT_URI}', configuration['dropbox']['redirectUri'])
+    for key in configuration.keys():
+        settings[key]=configuration[key]
 
-    composeTemplate = composeTemplate.replace('${DB_CACHE_SIZE_GB}', str(configuration['db']['cacheSizeGb']))
-
-    with open('{0}/docker-compose.yml'.format(PATH), 'w') as dockerCompose:
-        dockerCompose.write(composeTemplate)    
+    newEnvFileLines = []
+    for key in settings.keys():
+        newEnvFileLines.append('{0}={1}'.format(key, settings[key]))
+    
+    with open('{0}/.env'.format(PATH), 'w') as envFile:
+        envFile.write('\n'.join(newEnvFileLines))
 
 def loadConfigFromFile():   
     with open('{0}/config.json'.format(PATH), 'r') as configFile:
@@ -185,54 +166,48 @@ def loadFromWeb():
     return loadConfigFromFile()
 
 def downloadDockerComposeTemplate():
-    runShellCommandStrict('wget -O {0}/docker-compose.template.yml {1}'.format(PATH, configuration['dockerComposeTemplate']))
+    runShellCommandStrict('wget -O {0}/docker-compose.yml {1}'.format(PATH, DOCKER_COMPOSE_TEMPLATE_URL))
 
 def install(configuration):                             
     downloadDockerComposeTemplate()
         
     machineAddress = getMachineIpAddress()
 
-    print('Assigning {0} ip address to Ambar, Y to confirm or type in another IP address...'.format(machineAddress))
+    print('Assigning {0} IP address to Ambar, type "Y" to confirm or type in another IP address...'.format(machineAddress))
     userInput = input().lower()
     if (userInput == 'y'):
-        configuration['api']['external']['host'] = machineAddress
-        configuration['fe']['external']['host'] = machineAddress
+        configuration['host'] = machineAddress        
     elif (isValidIpV4Address(userInput)):
-        configuration['api']['external']['host'] = userInput
-        configuration['fe']['external']['host'] = userInput
+        configuration['host'] = userInput
     else:
         print('{0} is not a valid ipv4 address, try again...'.format(userInput))
         return
     
-    defaultPort = configuration['fe']['external']['port']
-    print('Assigning {0} port address to Ambar, Y to confirm or type in another port...'.format(defaultPort))
+    defaultPort = configuration['port']
+    print('Assigning {0} port address to Ambar, type "Y" to confirm or type in another port...'.format(defaultPort))
     userInput = input().lower()
     if (userInput != 'y'):
         try:
             userPort = int(userInput)
             if (userPort < 0 or userPort > 65535):
                raise ValueError()
-            configuration['api']['external']['port'] = userInput
-            configuration['fe']['external']['port'] = userInput
+            configuration['port'] = userInput
         except:
              print('{0} is not a valid port, try again...'.format(userInput))
 
     with open('{0}/config.json'.format(PATH), 'w') as configFile:
         json.dump(configuration, configFile, indent=4)
 
-    generateDockerCompose(configuration)
+    generateEnvFile(configuration)
     pullImages(configuration)
     setOsConstants()
     print('Ambar installed successfully! Run `sudo ./ambar.py start` to start Ambar')
 
 def start(configuration):    
     setRunTimeOsConstants()    
-    generateDockerCompose(configuration)
+    generateEnvFile(configuration)
     runShellCommandStrict('docker-compose -f {0}/docker-compose.yml -p ambar up -d'.format(PATH))
-    if not args.nowait:
-        print('Waiting for Ambar to start...')
-        time.sleep(30)
-    print('Ambar is on {0}://{1}:{2}'.format(configuration['fe']['external']['protocol'], configuration['fe']['external']['host'], configuration['fe']['external']['port']))
+    print('Ambar is on {0}://{1}:{2}'.format(configuration['protocol'], configuration['host'], configuration['port']))
 
 def stop(configuration):
     dockerRepo = configuration['dockerRepo']
@@ -247,7 +222,7 @@ def stop(configuration):
 def update(configuration):    
     stop(configuration)
     downloadDockerComposeTemplate()
-    generateDockerCompose(configuration)
+    generateEnvFile(configuration)
     pullImages(configuration)
     start(configuration)
 
@@ -278,7 +253,6 @@ def uninstall(configuration):
     stop(configuration)
     runShellCommand('rm -rf {0}'.format(dataPath))
     runShellCommand('rm -f ./config.json')
-    runShellCommand('rm -f ./docker-compose.template.yml')
     runShellCommand('rm -f ./docker-compose.yml')  
     print('Thank you for your interest in our product, you can send your feedback to hello@ambar.cloud. To remove the installer run `rm -f ambar.py`.')
 

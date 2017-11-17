@@ -1,42 +1,22 @@
-{        
-    "api": {        
-        "external":{
-            "host": "",
-            "protocol": "http",    
-            "port": "80"
-        },
-        "analyticsToken": "cda4b0bb11a1f32aed7564b08c455992",
-        "auth": "basic",
-        "mode": "ce",
-        "defaultLangAnalyzer": "ambar_en",
-        "pipelineCount": 1,
-        "crawlerCount": 1,
-        "cacheSize": "1g",
-        "showFilePreview": "false"
-    },    
-    "db": {
-        "cacheSizeGb": 2
-    },
-    "fe": {
-        "external":{
-            "host": "",
-            "protocol": "http",    
-            "port": "80"
-        }
-    },
-    "es": {        
-        "heapSize": "1g",
-        "containerSize": "2g"         
-    },              
-    "ocr": {
-        "pdfMaxPageCount": 5000,
-        "pdfSymbolsPerPageThreshold": 100
-    },
-    "dropbox": {
-        "clientId": "",
-        "redirectUri": ""
-    },
+{
+    "analyticsToken": "cda4b0bb11a1f32aed7564b08c455992",
+    "auth": "basic",
+    "mode": "ce",
+    "defaultLangAnalyzer": "ambar_en",
+    "pipelineCount": 1,
+    "crawlerCount": 1,
+    "nerEnabled": "true",
+    "dbCacheSizeGb": 2,
+    "uiLang": "en",
+    "esHeapSize": "1g",
+    "ocrPdfMaxPageCount": 5000,
+    "ocrPdfSymbolsPerPageThreshold": 100,
+    "dropboxClientId": "",
+    "dropboxredirectUri": "",
+    "host": "",
+    "protocol": "http",
+    "port": "80",
     "dockerRepo": "ambar",
-    "dockerComposeTemplate": "https://static.ambar.cloud/docker-compose.template.yml",
-    "dataPath": "/opt/ambar"  
+    "dataPath": "/opt/ambar",
+    "preserveOriginals": "false"
 }
